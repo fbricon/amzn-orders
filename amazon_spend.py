@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+import argparse
+import bisect
+import csv
+import io
+import json
+import os
+import sys
+import urllib.request
+import zipfile
+from collections import Counter, defaultdict
+from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+
+RETAIL_PREFIX = "retail.orderhistory"
+DIGITAL_MONEY = "digital orders monetary.csv"
+DIGITAL_ORDERS = "digital orders.csv"
+REFUND_PREFIX = "retail.ordersreturned.payments"
+
+CACHE_DIR = Path.home() / ".cache" / "amzn-orders"
+FALLBACK_RATE = {"USD": Decimal("0.92"), "GBP": Decimal("1.16"), "CAD": Decimal("0.68")}
+SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "JPY": "¥", "CAD": "CA$", "AUD": "A$", "CHF": "CHF "}
+
+STYLES = {
+    "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
+    "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
+    "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m",
+}
+COLOR_MODE = "auto"
+
+
+def paint(text, *styles):
+    enabled = COLOR_MODE == "always" or (COLOR_MODE == "auto" and sys.stdout.isatty())
+    if not enabled:
+        return text
+    return "".join(STYLES[s] for s in styles) + str(text) + STYLES["reset"]
+
+
+def classify(name):
+    n = Path(name).name.lower()
+    if n.startswith(RETAIL_PREFIX) and n.endswith(".csv"):
+        return "retail"
+    if n == DIGITAL_MONEY:
+        return "digital_money"
+    if n == DIGITAL_ORDERS:
+        return "digital_dates"
+    if n.startswith(REFUND_PREFIX) and n.endswith(".csv"):
+        return "refunds"
+    return None
+
+
+def iter_files(paths):
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            for f in sorted(p.rglob("*")):
+                if f.is_file() and f.suffix.lower() == ".csv":
+                    kind = classify(f.name)
+                    if kind:
+                        yield kind, str(f), f.read_text(encoding="utf-8-sig", errors="replace")
+        elif p.suffix.lower() == ".zip":
+            with zipfile.ZipFile(p) as z:
+                for info in z.infolist():
+                    if not info.is_dir():
+                        kind = classify(info.filename)
+                        if kind:
+                            yield kind, info.filename, z.read(info).decode("utf-8-sig", errors="replace")
+        else:
+            print(paint(f"warning: skipping {p} (not a folder or zip)", "yellow"), file=sys.stderr)
+
+
+def to_decimal(s):
+    try:
+        return Decimal(s.strip().replace(",", ""))
+    except Exception:
+        return None
+
+
+def to_date(s):
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+class Data:
+    def __init__(self):
+        self.retail = Counter()
+        self.digital = Counter()
+        self.refunds = Counter()
+        self.packet_dates = {}
+        self.files = 0
+
+
+def scan(paths):
+    data = Data()
+    for kind, name, text in iter_files(paths):
+        data.files += 1
+        reader = csv.DictReader(io.StringIO(text))
+        fields = {fn.strip(): fn for fn in reader.fieldnames or []}
+
+        def col(row, key):
+            return (row.get(fields.get(key)) or "").strip()
+
+        local = Counter()
+        if kind == "retail":
+            for r in reader:
+                cur = col(r, "Currency").upper()
+                amt = to_decimal(col(r, "Total Owed"))
+                if not cur or amt is None:
+                    continue
+                local[(col(r, "Order ID"), to_date(col(r, "Order Date")), cur, amt, col(r, "Product Name")[:60])] += 1
+        elif kind == "digital_dates":
+            for r in reader:
+                data.packet_dates.setdefault(col(r, "DeliveryPacketId"), to_date(col(r, "Order Date")))
+            continue
+        elif kind == "digital_money":
+            for r in reader:
+                cur = col(r, "BaseCurrencyCode").upper()
+                amt = to_decimal(col(r, "TransactionAmount"))
+                if not cur or amt is None:
+                    continue
+                local[(col(r, "DeliveryPacketId"), cur, amt)] += 1
+        elif kind == "refunds":
+            for r in reader:
+                if col(r, "Status") != "Completed":
+                    continue
+                cur = col(r, "Currency").upper()
+                amt = to_decimal(col(r, "AmountRefunded"))
+                if not cur or amt is None:
+                    continue
+                local[(col(r, "OrderID"), to_date(col(r, "RefundCompletionDate")), cur, amt)] += 1
+        else:
+            continue
+        target = {"retail": data.retail, "digital_money": data.digital, "refunds": data.refunds}[kind]
+        for key, n in local.items():
+            target[key] = max(target[key], n)
+    return data
+
+
+class Rates:
+    """Daily FX series stored as EUR-per-unit; converts to any target currency via cross rate."""
+
+    def __init__(self, target="EUR"):
+        self.target = target.upper()
+        self.series = {}
+
+    def load(self, currencies, years):
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        wanted = set(currencies) | {self.target}
+        offline = []
+        for cur in wanted:
+            if cur == "EUR":
+                continue
+            merged = {}
+            missing = []
+            caches = {}
+            for y in sorted(years):
+                cf = CACHE_DIR / f"{cur}-{y}.json"
+                caches[y] = cf
+                try:
+                    merged.update({date.fromisoformat(k): Decimal(str(v)) for k, v in json.loads(cf.read_text()).items()})
+                except Exception:
+                    missing.append(y)
+            for y in missing:
+                try:
+                    url = f"https://api.frankfurter.app/{y}-01-01..{y}-12-31?from={cur}&to=EUR"
+                    req = urllib.request.Request(url, headers={"User-Agent": "amzn-orders/1.0"})
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        payload = json.load(resp)["rates"]
+                    daily = {date.fromisoformat(k): Decimal(str(v["EUR"])) for k, v in payload.items() if v.get("EUR")}
+                    merged.update(daily)
+                    cf.write_text(json.dumps({k.isoformat(): str(v) for k, v in sorted(daily.items())}))
+                except Exception:
+                    offline.append(cur)
+            if merged:
+                days = sorted(merged)
+                self.series[cur] = (days, [merged[d] for d in days])
+            else:
+                offline.append(cur)
+        approx = set(offline)
+        if self.target != "EUR" and self.target in approx:
+            approx |= wanted - {"EUR"}
+        return approx
+
+    def _eur_per_unit(self, cur, day):
+        if cur == "EUR":
+            return Decimal("1")
+        if cur in self.series:
+            days, vals = self.series[cur]
+            idx = bisect.bisect_right(days, day) - 1 if day else len(days) - 1
+            return vals[max(idx, 0)]
+        return FALLBACK_RATE.get(cur)
+
+    def get(self, cur, day=None):
+        if cur == self.target:
+            return Decimal("1")
+        base = self._eur_per_unit(cur, day)
+        tgt = self._eur_per_unit(self.target, day) if self.target != "EUR" else Decimal("1")
+        if base is None or tgt in (None, Decimal("0")):
+            return Decimal("0")
+        return base / tgt
+
+
+def csym(code):
+    return SYMBOLS.get(code, code + " ")
+
+
+def fmt(x):
+    return f"{x.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
+
+
+def report(data, target="EUR"):
+    sym = csym(target)
+    purchases = [
+        row
+        for row, n in data.retail.items()
+        for _ in range(n)
+    ] + [
+        (pid, data.packet_dates.get(pid), cur, amt, "(digital)")
+        for (pid, cur, amt), n in data.digital.items()
+        for _ in range(n)
+    ]
+    refunds = [row for row, n in data.refunds.items() for _ in range(n)]
+
+    spent_cur = defaultdict(Decimal)
+    refund_cur = defaultdict(Decimal)
+    orders = defaultdict(set)
+    spent_year_cur = defaultdict(lambda: defaultdict(Decimal))
+    days = set()
+    for oid, d, cur, amt, name in purchases:
+        spent_cur[cur] += amt
+        orders[cur].add(oid)
+        if d:
+            spent_year_cur[d.year][cur] += amt
+            days.add(d)
+    refund_rows = [(oid, d, cur, amt) for oid, d, cur, amt in refunds]
+    for oid, d, cur, amt in refund_rows:
+        refund_cur[cur] += amt
+        if d:
+            days.add(d)
+
+    currencies = sorted(set(spent_cur) | set(refund_cur), key=lambda c: -spent_cur[c])
+    rates = Rates(target)
+    approx = rates.load(currencies, {d.year for d in days})
+    if target != "EUR" and target in approx and target not in FALLBACK_RATE:
+        print(paint(f"error: no exchange rates available for {target} (offline?)", "red"), file=sys.stderr)
+        sys.exit(1)
+
+    def to_target(amount, cur, d):
+        return amount * rates.get(cur, d)
+
+    total_spent = sum((to_target(a, c, d) for _, d, c, a, _ in purchases), Decimal("0"))
+    total_refund = sum((to_target(a, c, d) for _, d, c, a in refund_rows), Decimal("0"))
+
+    lines = [paint("AMAZON SPENDING OVERVIEW", "bold", "cyan"),
+             paint(f"{data.files} csv file(s) scanned · {len(purchases)} purchases · {len(refund_rows)} refunds", "dim"), ""]
+
+    lines.append(paint("Per currency (original amounts)", "bold"))
+    lines.append(paint(f"  {'CUR':<5}{'orders':>7}{'spent':>13}{'refunded':>11}{'net':>13}", "dim"))
+    for cur in currencies:
+        s, r = spent_cur[cur], refund_cur[cur]
+        ref = f"-{fmt(r)}" if r else "0.00"
+        cells = (
+            f"{cur:<5}",
+            f"{len(orders[cur]):>7}",
+            paint(f"{fmt(s):>13}"),
+            paint(f"{ref:>11}", "yellow" if r else "dim"),
+            paint(f"{fmt(s - r):>13}", "green"),
+        )
+        lines.append("  " + "".join(cells))
+    lines.append("")
+
+    lines.append(paint(f"Converted to {target}", "bold"))
+    for cur in currencies:
+        if cur == target:
+            continue
+        s = sum((to_target(a, c, d) for _, d, c, a, _ in purchases if c == cur), Decimal("0"))
+        r = sum((to_target(a, c, d) for _, d, c, a in refund_rows if c == cur), Decimal("0"))
+        note = paint(" (approx rate)", "yellow") if cur in approx else ""
+        seg = f"{f'{sym}{fmt(s)}':>14}"
+        if r:
+            seg += f"  {paint('-' + sym + fmt(r), 'red')}"
+        lines.append(f"  {cur:<5}{seg}{note}")
+    net = total_spent - total_refund
+    lines.append(paint(f"  TOTAL {sym}{fmt(net)}", "bold", "green"))
+    if total_refund:
+        lines.append(paint(f"  ({fmt(total_spent)} spent − {fmt(total_refund)} refunded)", "dim"))
+    lines.append("")
+
+    yearly = defaultdict(Decimal)
+    for _, d, c, a, _ in purchases:
+        if d:
+            yearly[d.year] += to_target(a, c, d)
+    for _, d, c, a in refund_rows:
+        if d:
+            yearly[d.year] -= to_target(a, c, d)
+    lines.append(paint(f"By year (net {target})", "bold"))
+    for y in sorted(yearly):
+        orig = ", ".join(f"{c} {fmt(v)}" for c, v in sorted(spent_year_cur[y].items()))
+        val = paint(f"{sym + fmt(yearly[y]):>14}", "bold", "green" if yearly[y] >= 0 else "red")
+        lines.append(f"  {y}  {val}   {paint(orig, 'dim')}")
+
+    top = sorted(((to_target(a, c, d), d, c, a, nm) for _, d, c, a, nm in purchases), key=lambda t: t[0], reverse=True)[:10]
+    lines.append("")
+    lines.append(paint(f"Top 10 largest purchases ({target})", "bold"))
+    for e, d, c, a, nm in top:
+        lines.append(f"  {d or '?'}  {paint(f'{sym}{fmt(e):>9}', 'cyan')}  {paint(f'({c} {fmt(a)})', 'dim')}  {(nm or '(unnamed)')[:48]}")
+
+    print("\n".join(lines))
+
+
+def main():
+    global COLOR_MODE
+    ap = argparse.ArgumentParser(description="Overview of Amazon spending from GDPR export folders/zips")
+    ap.add_argument("paths", nargs="+", help="Zip file(s) and/or extracted folder(s)")
+    ap.add_argument("--currency", metavar="CUR", default="EUR", help="Main display currency (default: EUR)")
+    ap.add_argument("--color", choices=["auto", "always", "never"], default="auto")
+    args = ap.parse_args()
+    COLOR_MODE = args.color
+    currency = args.currency.upper()
+    if len(currency) != 3 or not currency.isalpha():
+        ap.error(f"invalid --currency {args.currency!r}: expected a 3-letter code like USD, CAD, GBP")
+
+    data = scan(args.paths)
+    if not data.files:
+        print("No Amazon order CSVs found.", file=sys.stderr)
+        sys.exit(1)
+    report(data, currency)
+
+
+if __name__ == "__main__":
+    main()
