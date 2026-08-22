@@ -332,17 +332,17 @@ def report(data, target="EUR"):
         if d:
             refund_year_cur[d.year][c] += a
     lines.append(paint(f"By year (net {target})", "bold"))
+    lines.append(paint(f"  {'YEAR':<6}{'NET':>14}{'REFUNDED':>15}  SPENT (original)", "dim"))
     for y in sorted(yearly):
         spent = ", ".join(f"{c} {fmt(v)}" for c, v in sorted(spent_year_cur[y].items()) if v)
         refs = ", ".join(f"-{c} {fmt(v)}" for c, v in sorted(refund_year_cur[y].items()) if v)
-        detail = paint("spent " + spent, "dim") if spent else ""
-        if refs:
-            detail += ("  " if detail else "") + paint(f"refunds {refs}", "dim", "yellow")
         val = paint(f"{sym + fmt(yearly[y]):>14}", "bold", "green" if yearly[y] >= 0 else "red")
-        lines.append(f"  {y}  {val}   {detail}")
+        ref_cell = paint(f"{refs:>15}", "red") if refs else f"{'':>15}"
+        lines.append(f"  {y:<6}{val}{ref_cell}  {paint(spent, 'dim')}")
     year_total = sum(yearly.values(), Decimal("0"))
     total_label = paint(f"{'TOTAL':<6}", "bold")
-    lines.append(f"  {total_label}{paint(f'{sym + fmt(year_total):>14}', 'bold', 'green')}")
+    tr_cell = paint(f"{'-' + sym + fmt(total_refund):>15}", "red") if total_refund else f"{'':>15}"
+    lines.append(f"  {total_label}{paint(f'{sym + fmt(year_total):>14}', 'bold', 'green')}{tr_cell}")
 
     top = sorted(((to_target(a, c, d), d, c, a, nm) for _, d, c, a, nm in purchases), key=lambda t: t[0], reverse=True)[:10]
     lines.append("")
