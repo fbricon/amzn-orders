@@ -17,6 +17,9 @@ RETAIL_PREFIX = "retail.orderhistory"
 DIGITAL_MONEY = "digital orders monetary.csv"
 DIGITAL_ORDERS = "digital orders.csv"
 REFUND_PREFIX = "retail.ordersreturned.payments"
+NEW_RETAIL = "order history.csv"
+NEW_DIGITAL = "digital content orders.csv"
+NEW_REFUNDS = "refund details.csv"
 
 CACHE_DIR = Path.home() / ".cache" / "amzn-orders"
 FALLBACK_RATE = {"USD": Decimal("0.92"), "GBP": Decimal("1.16"), "CAD": Decimal("0.68")}
@@ -39,13 +42,15 @@ def paint(text, *styles):
 
 def classify(name):
     n = Path(name).name.lower()
-    if n.startswith(RETAIL_PREFIX) and n.endswith(".csv"):
+    if not n.endswith(".csv"):
+        return None
+    if n == NEW_RETAIL or n.startswith(RETAIL_PREFIX):
         return "retail"
-    if n == DIGITAL_MONEY:
+    if n in (NEW_DIGITAL, DIGITAL_MONEY):
         return "digital_money"
     if n == DIGITAL_ORDERS:
         return "digital_dates"
-    if n.startswith(REFUND_PREFIX) and n.endswith(".csv"):
+    if n == NEW_REFUNDS or n.startswith(REFUND_PREFIX):
         return "refunds"
     return None
 
@@ -89,54 +94,80 @@ class Data:
         self.retail = Counter()
         self.digital = Counter()
         self.refunds = Counter()
-        self.packet_dates = {}
+        self.packet_info = {}
         self.files = 0
 
 
 def scan(paths):
     data = Data()
+    deferred = []
     for kind, name, text in iter_files(paths):
         data.files += 1
-        reader = csv.DictReader(io.StringIO(text))
-        fields = {fn.strip(): fn for fn in reader.fieldnames or []}
-
-        def col(row, key):
-            return (row.get(fields.get(key)) or "").strip()
-
-        local = Counter()
-        if kind == "retail":
-            for r in reader:
-                cur = col(r, "Currency").upper()
-                amt = to_decimal(col(r, "Total Owed"))
-                if not cur or amt is None:
-                    continue
-                local[(col(r, "Order ID"), to_date(col(r, "Order Date")), cur, amt, col(r, "Product Name")[:60])] += 1
-        elif kind == "digital_dates":
-            for r in reader:
-                data.packet_dates.setdefault(col(r, "DeliveryPacketId"), to_date(col(r, "Order Date")))
+        if kind == "digital_money":
+            deferred.append(text)
             continue
-        elif kind == "digital_money":
-            for r in reader:
-                cur = col(r, "BaseCurrencyCode").upper()
-                amt = to_decimal(col(r, "TransactionAmount"))
-                if not cur or amt is None:
-                    continue
-                local[(col(r, "DeliveryPacketId"), cur, amt)] += 1
-        elif kind == "refunds":
-            for r in reader:
-                if col(r, "Status") != "Completed":
-                    continue
-                cur = col(r, "Currency").upper()
-                amt = to_decimal(col(r, "AmountRefunded"))
-                if not cur or amt is None:
-                    continue
-                local[(col(r, "OrderID"), to_date(col(r, "RefundCompletionDate")), cur, amt)] += 1
-        else:
-            continue
-        target = {"retail": data.retail, "digital_money": data.digital, "refunds": data.refunds}[kind]
-        for key, n in local.items():
-            target[key] = max(target[key], n)
+        _scan_csv(data, kind, text)
+
+    for text in deferred:
+        _scan_csv(data, "digital_money", text)
     return data
+
+
+def _scan_csv(data, kind, text):
+    reader = csv.DictReader(io.StringIO(text))
+    fields = {fn.strip(): fn for fn in reader.fieldnames or []}
+
+    def col(row, key):
+        return (row.get(fields.get(key)) or "").strip()
+
+    def num(row, *keys):
+        for k in keys:
+            v = to_decimal(col(row, k))
+            if v is not None:
+                return v
+        return None
+
+    local = Counter()
+    if kind == "retail":
+        for r in reader:
+            cur = col(r, "Currency").upper()
+            amt = num(r, "Total Owed", "Total Amount")
+            if not cur or amt is None:
+                continue
+            local[(col(r, "Order ID"), to_date(col(r, "Order Date")), cur, amt, col(r, "Product Name")[:60])] += 1
+    elif kind == "digital_dates":
+        for r in reader:
+            pid = col(r, "DeliveryPacketId")
+            d = to_date(col(r, "OrderDate")) or to_date(col(r, "Order Date"))
+            oid = col(r, "OrderId") or col(r, "Order ID")
+            data.packet_info.setdefault(pid, (d, oid))
+        return
+    elif kind == "digital_money":
+        for r in reader:
+            cur = (col(r, "BaseCurrencyCode") or col(r, "Base Currency Code")).upper()
+            amt = num(r, "TransactionAmount", "Transaction Amount")
+            if not cur or amt is None:
+                continue
+            pid = col(r, "DeliveryPacketId") or col(r, "Delivery Packet ID")
+            pdate, poid = data.packet_info.get(pid, (None, ""))
+            oid = col(r, "Order ID") or poid or pid
+            d = to_date(col(r, "Fulfilled Date")) or to_date(col(r, "Order Date")) or pdate
+            local[(oid, d, cur, amt)] += 1
+    elif kind == "refunds":
+        for r in reader:
+            if col(r, "Status") != "Completed" and col(r, "Payment Status") != "Completed":
+                continue
+            cur = col(r, "Currency").upper()
+            amt = num(r, "AmountRefunded", "Refund Amount")
+            if not cur or amt is None:
+                continue
+            d = to_date(col(r, "RefundCompletionDate")) or to_date(col(r, "Refund Date"))
+            local[(col(r, "OrderID") or col(r, "Order ID"), d, cur, amt)] += 1
+    else:
+        return
+    target = {"retail": data.retail, "digital_money": data.digital, "refunds": data.refunds}[kind]
+    for key, n in local.items():
+        target[key] = max(target[key], n)
 
 
 class Rates:
@@ -218,8 +249,8 @@ def report(data, target="EUR"):
         for row, n in data.retail.items()
         for _ in range(n)
     ] + [
-        (pid, data.packet_dates.get(pid), cur, amt, "(digital)")
-        for (pid, cur, amt), n in data.digital.items()
+        (oid, d, cur, amt, "(digital)")
+        for (oid, d, cur, amt), n in data.digital.items()
         for _ in range(n)
     ]
     refunds = [row for row, n in data.refunds.items() for _ in range(n)]

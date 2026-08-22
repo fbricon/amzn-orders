@@ -94,16 +94,17 @@ Converted to EUR
 
 ## How it works
 
-The tool scans each source for these CSVs and ignores everything else:
+The tool scans each source for these CSVs and ignores everything else
+(both the classic GDPR layout and the newer "Your Amazon Orders" layout):
 
 | File pattern | Used for |
 |--------------|----------|
-| `Retail.OrderHistory*.csv` | Retail purchases (`Total Owed` per line item) |
-| `Digital Orders Monetary.csv` + `Digital Orders.csv` | Digital purchases (Kindle, apps…) |
-| `Retail.OrdersReturned.Payments*.csv` | Completed refunds |
+| `Retail.OrderHistory*.csv` or `Order History.csv` | Retail purchases (`Total Owed`/`Total Amount` per line item) |
+| `Digital Orders Monetary.csv` (+ `Digital Orders.csv`) or `Digital Content Orders.csv` | Digital purchases (Kindle, apps…) |
+| `Retail.OrdersReturned.Payments*.csv` or `Refund Details.csv` | Completed refunds |
 
-Identical rows found in multiple sources are counted once, so you can safely
-combine overlapping exports.
+Identical rows found in multiple sources are counted once — even across the
+two export layouts — so you can safely combine overlapping exports.
 
 Exchange rates are cached per currency/year in `~/.cache/amzn-orders`. If the
 API is unreachable, approximate flat rates are used instead and flagged with
