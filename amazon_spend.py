@@ -134,7 +134,7 @@ def _scan_csv(data, kind, text):
             amt = num(r, "Total Owed", "Total Amount")
             if not cur or amt is None:
                 continue
-            local[(col(r, "Order ID"), to_date(col(r, "Order Date")), cur, amt, col(r, "Product Name")[:60])] += 1
+            local[(col(r, "Order ID"), to_date(col(r, "Order Date")), cur, amt, col(r, "Product Name"))] += 1
     elif kind == "digital_dates":
         for r in reader:
             pid = col(r, "DeliveryPacketId")
@@ -327,17 +327,39 @@ def report(data, target="EUR"):
     for _, d, c, a in refund_rows:
         if d:
             yearly[d.year] -= to_target(a, c, d)
+    refund_year_cur = defaultdict(lambda: defaultdict(Decimal))
+    for _, d, c, a in refund_rows:
+        if d:
+            refund_year_cur[d.year][c] += a
     lines.append(paint(f"By year (net {target})", "bold"))
     for y in sorted(yearly):
-        orig = ", ".join(f"{c} {fmt(v)}" for c, v in sorted(spent_year_cur[y].items()))
+        spent = ", ".join(f"{c} {fmt(v)}" for c, v in sorted(spent_year_cur[y].items()) if v)
+        refs = ", ".join(f"-{c} {fmt(v)}" for c, v in sorted(refund_year_cur[y].items()) if v)
+        detail = paint("spent " + spent, "dim") if spent else ""
+        if refs:
+            detail += ("  " if detail else "") + paint(f"refunds {refs}", "dim", "yellow")
         val = paint(f"{sym + fmt(yearly[y]):>14}", "bold", "green" if yearly[y] >= 0 else "red")
-        lines.append(f"  {y}  {val}   {paint(orig, 'dim')}")
+        lines.append(f"  {y}  {val}   {detail}")
+    year_total = sum(yearly.values(), Decimal("0"))
+    total_label = paint(f"{'TOTAL':<6}", "bold")
+    lines.append(f"  {total_label}{paint(f'{sym + fmt(year_total):>14}', 'bold', 'green')}")
 
     top = sorted(((to_target(a, c, d), d, c, a, nm) for _, d, c, a, nm in purchases), key=lambda t: t[0], reverse=True)[:10]
     lines.append("")
     lines.append(paint(f"Top 10 largest purchases ({target})", "bold"))
     for e, d, c, a, nm in top:
-        lines.append(f"  {d or '?'}  {paint(f'{sym}{fmt(e):>9}', 'cyan')}  {paint(f'({c} {fmt(a)})', 'dim')}  {(nm or '(unnamed)')[:48]}")
+        name = (nm or "(unnamed)")
+        if len(name) > 48:
+            name = name[:47].rstrip() + "…"
+        extra = "" if c == target else "  " + paint(f"({c} {fmt(a)})", "dim")
+        lines.append(f"  {d or '?'}  {paint(f'{sym}{fmt(e):>9}', 'cyan')}{extra}  {name}")
+
+    lines.append("")
+    lines.append(paint(
+        f"FX: ECB daily reference rates via frankfurter.app — purchases at purchase-date rate,"
+        f" refunds at refund-date rate · cached in ~/.cache/amzn-orders",
+        "dim",
+    ))
 
     print("\n".join(lines))
 
