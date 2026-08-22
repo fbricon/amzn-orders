@@ -297,7 +297,7 @@ def report(data, target="EUR"):
             f"{cur:<5}",
             f"{len(orders[cur]):>7}",
             paint(f"{fmt(s):>13}"),
-            paint(f"{ref:>11}", "yellow" if r else "dim"),
+            paint(f"{ref:>11}", "red" if r else "dim"),
             paint(f"{fmt(s - r):>13}", "green"),
         )
         lines.append("  " + "".join(cells))
