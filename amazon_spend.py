@@ -4,6 +4,7 @@ import bisect
 import csv
 import io
 import json
+import re
 import sys
 import urllib.request
 import zipfile
@@ -76,9 +77,28 @@ def iter_files(paths):
             print(paint(f"warning: skipping {p} (not a folder or zip)", "yellow"), file=sys.stderr)
 
 
+def _hdr(name):
+    """Normalize a CSV header for tolerant matching: 'Order-ID'/'order id'/'OrderID' all match."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
 def to_decimal(s):
+    # Accepts '1234.56', '1,234.56' and European-style '1.234,56' / '12,34'.
+    s = re.sub(r"[^\d.,+-]", "", s.strip())
+    if not s:
+        return None
+    if "," in s and "." in s:
+        dec = "," if s.rfind(",") > s.rfind(".") else "."
+        thou = "." if dec == "," else ","
+        s = s.replace(thou, "").replace(dec, ".")
+    elif "," in s:
+        parts = s.split(",")
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            s = "".join(parts)
+        else:
+            s = s.replace(",", ".")
     try:
-        return Decimal(s.strip().replace(",", ""))
+        return Decimal(s)
     except Exception:
         return None
 
@@ -116,10 +136,12 @@ def scan(paths):
 
 def _scan_csv(data, kind, text):
     reader = csv.DictReader(io.StringIO(text))
-    fields = {fn.strip(): fn for fn in reader.fieldnames or []}
+    fields = {}
+    for fn in reader.fieldnames or []:
+        fields.setdefault(_hdr(fn), fn)
 
     def col(row, key):
-        return (row.get(fields.get(key)) or "").strip()
+        return (row.get(fields.get(_hdr(key))) or "").strip()
 
     def num(row, *keys):
         for k in keys:
