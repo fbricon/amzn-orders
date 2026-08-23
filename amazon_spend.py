@@ -201,8 +201,10 @@ class Rates:
     def __init__(self, target="EUR"):
         self.target = target.upper()
         self.series = {}
+        self.approx_used = set()
 
     def load(self, currencies, years):
+        """Load daily rates for currencies+target; returns currencies with NO rate data at all."""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         wanted = set(currencies) | {self.target}
         years = set(years) or {date.today().year}
@@ -220,6 +222,7 @@ class Rates:
                     merged.update({date.fromisoformat(k): v for k, v in json.loads(cf.read_text(), parse_float=Decimal).items()})
                 except Exception:
                     missing.append(y)
+            fetched = False
             for y in missing:
                 try:
                     url = f"https://api.frankfurter.app/{y}-01-01..{y}-12-31?from={cur}&to=EUR"
@@ -229,17 +232,15 @@ class Rates:
                     daily = {date.fromisoformat(k): v["EUR"] for k, v in payload.items() if v.get("EUR")}
                     merged.update(daily)
                     cf.write_text(json.dumps({k.isoformat(): str(v) for k, v in sorted(daily.items())}))
+                    fetched = True
                 except Exception:
-                    offline.append(cur)
+                    pass
             if merged:
                 days = sorted(merged)
                 self.series[cur] = (days, [merged[d] for d in days])
-            else:
+            elif not fetched:
                 offline.append(cur)
-        approx = set(offline)
-        if self.target != "EUR" and self.target in approx:
-            approx |= wanted - {"EUR"}
-        return approx
+        return set(offline)
 
     def _eur_per_unit(self, cur, day):
         if cur == "EUR":
@@ -248,15 +249,19 @@ class Rates:
             days, vals = self.series[cur]
             idx = bisect.bisect_right(days, day) - 1 if day else len(days) - 1
             return vals[max(idx, 0)]
-        return FALLBACK_RATE.get(cur)
+        rate = FALLBACK_RATE.get(cur)
+        if rate is not None:
+            self.approx_used.add(cur)
+        return rate
 
     def get(self, cur, day=None):
+        """Rate cur -> target, or None when no data is available."""
         if cur == self.target:
             return Decimal("1")
         base = self._eur_per_unit(cur, day)
         tgt = self._eur_per_unit(self.target, day) if self.target != "EUR" else Decimal("1")
-        if base is None or tgt in (None, Decimal("0")):
-            return Decimal("0")
+        if base is None or tgt is None:
+            return None
         return base / tgt
 
 
@@ -299,16 +304,33 @@ def report(data, target="EUR"):
 
     currencies = sorted(set(spent_cur) | set(refund_cur), key=lambda c: -spent_cur[c])
     rates = Rates(target)
-    approx = rates.load(currencies, {d.year for d in days})
-    if target != "EUR" and target in approx and target not in FALLBACK_RATE:
+    no_data = rates.load(currencies, {d.year for d in days})
+    if target != "EUR" and target in no_data and target not in FALLBACK_RATE:
         print(paint(f"error: no exchange rates available for {target} (offline?)", "red"), file=sys.stderr)
         sys.exit(1)
 
     def to_target(amount, cur, d):
-        return amount * rates.get(cur, d)
+        rate = rates.get(cur, d)
+        return None if rate is None else amount * rate
 
-    total_spent = sum((to_target(a, c, d) for _, d, c, a, _ in purchases), Decimal("0"))
-    total_refund = sum((to_target(a, c, d) for _, d, c, a in refund_rows), Decimal("0"))
+    total_spent = Decimal("0")
+    total_refund = Decimal("0")
+    excluded_n = Counter()
+    excluded_sum = defaultdict(Decimal)
+    for _, d, c, a, _ in purchases:
+        v = to_target(a, c, d)
+        if v is None:
+            excluded_n[c] += 1
+            excluded_sum[c] += a
+        else:
+            total_spent += v
+    for _, d, c, a in refund_rows:
+        v = to_target(a, c, d)
+        if v is None:
+            excluded_n[c] += 1
+            excluded_sum[c] += a
+        else:
+            total_refund += v
 
     lines = [paint("AMAZON SPENDING OVERVIEW", "bold", "cyan"),
              paint(f"{data.files} csv file(s) scanned · {len(purchases)} purchases · {len(refund_rows)} refunds", "dim"), ""]
@@ -332,15 +354,24 @@ def report(data, target="EUR"):
     for cur in currencies:
         if cur == target:
             continue
-        s = sum((to_target(a, c, d) for _, d, c, a, _ in purchases if c == cur), Decimal("0"))
-        r = sum((to_target(a, c, d) for _, d, c, a in refund_rows if c == cur), Decimal("0"))
-        note = paint(" (approx rate)", "yellow") if cur in approx else ""
+        if cur in excluded_n:
+            lines.append(f"  {cur:<5}  {paint(f'no FX data — {excluded_n[cur]} transaction(s) {csym(cur)}{fmt(excluded_sum[cur])} excluded', 'red')}")
+            continue
+        s = sum((v for _, d, c, a, _ in purchases if c == cur for v in [to_target(a, c, d)] if v is not None), Decimal("0"))
+        r = sum((v for _, d, c, a in refund_rows if c == cur for v in [to_target(a, c, d)] if v is not None), Decimal("0"))
+        note = paint(" (approx rate)", "yellow") if cur in no_data or cur in rates.approx_used else ""
         seg = f"{f'{sym}{fmt(s)}':>14}"
         if r:
             seg += f"  {paint('-' + sym + fmt(r), 'red')}"
         lines.append(f"  {cur:<5}{seg}{note}")
     net = total_spent - total_refund
     lines.append(paint(f"  TOTAL {sym}{fmt(net)}", "bold", "green"))
+    if rates.approx_used:
+        lines.append(paint(f"  (approximate FX rates used for: {', '.join(sorted(rates.approx_used))})", "yellow"))
+    if excluded_n:
+        n = sum(excluded_n.values())
+        lines.append(paint(f"  ! {n} transaction(s) missing from totals — no FX data for: {', '.join(sorted(excluded_n))}", "red"))
+        print(paint(f"warning: no exchange rates for {', '.join(sorted(excluded_n))}; {n} transaction(s) excluded from {target} totals", "yellow"), file=sys.stderr)
     if total_refund:
         lines.append(paint(f"  ({fmt(total_spent)} spent − {fmt(total_refund)} refunded)", "dim"))
     lines.append("")
@@ -348,10 +379,14 @@ def report(data, target="EUR"):
     yearly = defaultdict(Decimal)
     for _, d, c, a, _ in purchases:
         if d:
-            yearly[d.year] += to_target(a, c, d)
+            v = to_target(a, c, d)
+            if v is not None:
+                yearly[d.year] += v
     for _, d, c, a in refund_rows:
         if d:
-            yearly[d.year] -= to_target(a, c, d)
+            v = to_target(a, c, d)
+            if v is not None:
+                yearly[d.year] -= v
     refund_year_cur = defaultdict(lambda: defaultdict(Decimal))
     for _, d, c, a in refund_rows:
         if d:
@@ -371,7 +406,8 @@ def report(data, target="EUR"):
     tr_cell = paint(f"{'-' + sym + fmt(total_refund):>{refw}}", "red") if total_refund else f"{'':>{refw}}"
     lines.append(f"  {total_label}{paint(f'{sym + fmt(year_total):>14}', 'bold', 'green')}  {tr_cell}")
 
-    top = sorted(((to_target(a, c, d), d, c, a, nm) for _, d, c, a, nm in purchases), key=lambda t: t[0], reverse=True)[:10]
+    ranked = [(v, d, c, a, nm) for _, d, c, a, nm in purchases for v in [to_target(a, c, d)] if v is not None]
+    top = sorted(ranked, key=lambda t: t[0], reverse=True)[:10]
     lines.append("")
     lines.append(paint(f"Top 10 largest purchases ({target})", "bold"))
     for e, d, c, a, nm in top:
