@@ -4,7 +4,6 @@ import bisect
 import csv
 import io
 import json
-import os
 import sys
 import urllib.request
 import zipfile
