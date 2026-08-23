@@ -183,9 +183,13 @@ def _scan_csv(data, kind, opener):
                 pid = col(r, "DeliveryPacketId")
                 d = to_date(col(r, "OrderDate")) or to_date(col(r, "Order Date"))
                 oid = col(r, "OrderId") or col(r, "Order ID")
-                prev = data.packet_info.get(pid)
-                if prev is None or (d and not prev[0]):
-                    data.packet_info[pid] = (d, oid)
+            prev = data.packet_info.get(pid)
+            if prev is None:
+                data.packet_info[pid] = (d, oid)
+            else:
+                merged = (d or prev[0], oid or prev[1])
+                if merged != prev:
+                    data.packet_info[pid] = merged
             return
         elif kind == "digital_money":
             for r in reader:
