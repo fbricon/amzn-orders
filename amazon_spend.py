@@ -190,7 +190,7 @@ class Rates:
                 cf = CACHE_DIR / f"{cur}-{y}.json"
                 caches[y] = cf
                 try:
-                    merged.update({date.fromisoformat(k): Decimal(str(v)) for k, v in json.loads(cf.read_text()).items()})
+                    merged.update({date.fromisoformat(k): v for k, v in json.loads(cf.read_text(), parse_float=Decimal).items()})
                 except Exception:
                     missing.append(y)
             for y in missing:
@@ -198,8 +198,8 @@ class Rates:
                     url = f"https://api.frankfurter.app/{y}-01-01..{y}-12-31?from={cur}&to=EUR"
                     req = urllib.request.Request(url, headers={"User-Agent": "amzn-orders/1.0"})
                     with urllib.request.urlopen(req, timeout=15) as resp:
-                        payload = json.load(resp)["rates"]
-                    daily = {date.fromisoformat(k): Decimal(str(v["EUR"])) for k, v in payload.items() if v.get("EUR")}
+                        payload = json.load(resp, parse_float=Decimal)["rates"]
+                    daily = {date.fromisoformat(k): v["EUR"] for k, v in payload.items() if v.get("EUR")}
                     merged.update(daily)
                     cf.write_text(json.dumps({k.isoformat(): str(v) for k, v in sorted(daily.items())}))
                 except Exception:
