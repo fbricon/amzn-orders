@@ -4,6 +4,7 @@ import bisect
 import csv
 import io
 import json
+import locale
 import os
 import re
 import sys
@@ -40,7 +41,30 @@ def _cache_dir():
 
 CACHE_DIR = _cache_dir()
 FALLBACK_RATE = {"USD": Decimal("0.92"), "GBP": Decimal("1.16"), "CAD": Decimal("0.68")}
-SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "JPY": "¥", "INR": "₹", "CAD": "CA$", "AUD": "A$", "CHF": "CHF "}
+SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "JPY": "¥", "INR": "₹", "CAD": "CA$", "AUD": "A$", "CHF": "CHF"}
+ZERO_DECIMAL = {"JPY"}
+LOCALE_READY = False
+
+
+def setup_locale(preferred=None):
+    """Adopt a locale for number/currency formatting; falls back to C (dot decimals).
+    Returns False only when an explicitly requested locale is unavailable."""
+    global LOCALE_READY
+    if preferred:
+        candidates = [preferred, preferred.split(".")[0]]
+    else:
+        candidates = [os.environ.get("LC_ALL"), os.environ.get("LC_NUMERIC"), os.environ.get("LANG"), ""]
+    for loc in candidates:
+        if loc is None:
+            continue
+        try:
+            locale.setlocale(locale.LC_ALL, loc)
+            LOCALE_READY = loc not in ("C", "POSIX")
+            return True
+        except locale.Error:
+            continue
+    LOCALE_READY = False
+    return False
 
 STYLES = {
     "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
@@ -319,8 +343,29 @@ def csym(code):
     return SYMBOLS.get(code, code + " ")
 
 
-def fmt(x):
-    return f"{x.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
+def fmt(x, decimals=2):
+    x = x.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+    if LOCALE_READY:
+        return locale.format_string(f"%.{decimals}f", x, grouping=True)
+    return f"{x:,.{decimals}f}"
+
+
+def money(amount, code):
+    """Amount with its symbol placed per the active locale (e.g. €1.234,56 or 1 234,56 €)."""
+    sign = "-" if amount < 0 else ""
+    text = fmt(abs(amount), minor_units(code))
+    sym = csym(code)
+    if not LOCALE_READY:
+        return f"{sign}{sym}{text}"
+    conv = locale.localeconv()
+    sep = " " if conv["p_sep_by_space"] else ""
+    if conv["p_cs_precedes"]:
+        return f"{sign}{sym}{sep}{text}"
+    return f"{sign}{text}{sep}{sym}"
+
+
+def minor_units(code):
+    return 0 if code.upper() in ZERO_DECIMAL else 2
 
 
 def fx_universe(data):
@@ -346,7 +391,6 @@ def load_rates_or_exit(data, target):
 
 
 def report(data, target="EUR", rates=None):
-    sym = csym(target)
     purchases = [
         row
         for row, n in data.retail.items()
@@ -404,13 +448,14 @@ def report(data, target="EUR", rates=None):
     lines.append(paint(f"  {'CUR':<5}{'orders':>7}{'spent':>13}{'refunded':>11}{'net':>13}", "dim"))
     for cur in currencies:
         s, r = spent_cur[cur], refund_cur[cur]
-        ref = f"-{fmt(r)}" if r else "0.00"
+        dec = minor_units(cur)
+        ref = f"-{fmt(r, dec)}" if r else fmt(Decimal(0), dec)
         cells = (
             f"{cur:<5}",
             f"{len(orders[cur]):>7}",
-            paint(f"{fmt(s):>13}"),
+            paint(f"{fmt(s, dec):>13}"),
             paint(f"{ref:>11}", "red" if r else "dim"),
-            paint(f"{fmt(s - r):>13}", "green"),
+            paint(f"{fmt(s - r, dec):>13}", "green"),
         )
         lines.append("  " + "".join(cells))
     lines.append("")
@@ -420,17 +465,17 @@ def report(data, target="EUR", rates=None):
         if cur == target:
             continue
         if cur in excluded_n:
-            lines.append(f"  {cur:<5}  {paint(f'no FX data — {excluded_n[cur]} transaction(s) {csym(cur)}{fmt(excluded_sum[cur])} excluded', 'red')}")
+            lines.append(f"  {cur:<5}  {paint(f'no FX data — {excluded_n[cur]} transaction(s) {money(excluded_sum[cur], cur)} excluded', 'red')}")
             continue
         s = sum((v for _, d, c, a, _ in purchases if c == cur for v in [to_target(a, c, d)] if v is not None), Decimal("0"))
         r = sum((v for _, d, c, a in refund_rows if c == cur for v in [to_target(a, c, d)] if v is not None), Decimal("0"))
         note = paint(" (approx rate)", "yellow") if cur in rates.offline or cur in rates.approx_used else ""
-        seg = f"{f'{sym}{fmt(s)}':>14}"
+        seg = f"{money(s, cur):>14}"
         if r:
-            seg += f"  {paint('-' + sym + fmt(r), 'red')}"
+            seg += f"  {paint(money(-r, cur), 'red')}"
         lines.append(f"  {cur:<5}{seg}{note}")
     net = total_spent - total_refund
-    lines.append(paint(f"  TOTAL {sym}{fmt(net)}", "bold", "green"))
+    lines.append(paint(f"  TOTAL {money(net, target)}", "bold", "green"))
     if rates.approx_used:
         lines.append(paint(f"  (approximate FX rates used for: {', '.join(sorted(rates.approx_used))})", "yellow"))
     if excluded_n:
@@ -438,7 +483,7 @@ def report(data, target="EUR", rates=None):
         lines.append(paint(f"  ! {n} transaction(s) missing from totals — no FX data for: {', '.join(sorted(excluded_n))}", "red"))
         print(paint(f"warning: no exchange rates for {', '.join(sorted(excluded_n))}; {n} transaction(s) excluded from {target} totals", "yellow"), file=sys.stderr)
     if total_refund:
-        lines.append(paint(f"  ({sym}{fmt(total_spent)} spent − {sym}{fmt(total_refund)} refunded)", "dim"))
+        lines.append(paint(f"  ({money(total_spent, target)} spent − {money(total_refund, target)} refunded)", "dim"))
     lines.append("")
 
     yearly = defaultdict(Decimal)
@@ -456,20 +501,20 @@ def report(data, target="EUR", rates=None):
     for _, d, c, a in refund_rows:
         if d:
             refund_year_cur[d.year][c] += a
-    ref_by_year = {y: ", ".join(f"-{c} {fmt(v)}" for c, v in sorted(refund_year_cur[y].items()) if v) for y in yearly}
+    ref_by_year = {y: ", ".join(f"-{money(v, c)}" for c, v in sorted(refund_year_cur[y].items()) if v) for y in yearly}
     refw = max(8, max((len(s) for s in ref_by_year.values()), default=0))
     lines.append(paint(f"By year (net {target})", "bold"))
     lines.append(paint(f"  {'YEAR':<6}{'NET':>14}  {'REFUNDED':>{refw}}  SPENT (original)", "dim"))
     for y in sorted(yearly):
-        spent = ", ".join(f"{c} {fmt(v)}" for c, v in sorted(spent_year_cur[y].items()) if v)
-        val = paint(f"{sym + fmt(yearly[y]):>14}", "bold", "green" if yearly[y] >= 0 else "red")
+        spent = ", ".join(money(v, c) for c, v in sorted(spent_year_cur[y].items()) if v)
+        val = paint(f"{money(yearly[y], target):>14}", "bold", "green" if yearly[y] >= 0 else "red")
         refs = ref_by_year[y]
         ref_cell = paint(f"{refs:>{refw}}", "red") if refs else f"{'':>{refw}}"
         lines.append(f"  {y:<6}{val}  {ref_cell}  {paint(spent, 'dim')}")
     year_total = sum(yearly.values(), Decimal("0"))
     total_label = paint(f"{'TOTAL':<6}", "bold")
-    tr_cell = paint(f"{'-' + sym + fmt(total_refund):>{refw}}", "red") if total_refund else f"{'':>{refw}}"
-    lines.append(f"  {total_label}{paint(f'{sym + fmt(year_total):>14}', 'bold', 'green')}  {tr_cell}")
+    tr_cell = paint(f"{money(-total_refund, target):>{refw}}", "red") if total_refund else f"{'':>{refw}}"
+    lines.append(f"  {total_label}{paint(f'{money(year_total, target):>14}', 'bold', 'green')}  {tr_cell}")
 
     ranked = [(v, d, c, a, nm) for _, d, c, a, nm in purchases for v in [to_target(a, c, d)] if v is not None]
     top = sorted(ranked, key=lambda t: t[0], reverse=True)[:10]
@@ -479,8 +524,8 @@ def report(data, target="EUR", rates=None):
         name = (nm or "(unnamed)")
         if len(name) > 48:
             name = name[:47].rstrip() + "…"
-        extra = "" if c == target else "  " + paint(f"({c} {fmt(a)})", "dim")
-        lines.append(f"  {d or '?'}  {paint(f'{sym}{fmt(e):>9}', 'cyan')}{extra}  {name}")
+        extra = "" if c == target else "  " + paint(f"({money(a, c)})", "dim")
+        lines.append(f"  {d or '?'}  {paint(f'{money(e, target):>9}', 'cyan')}{extra}  {name}")
 
     lines.append("")
     cache_disp = str(CACHE_DIR).replace(str(Path.home()), "~", 1)
@@ -504,8 +549,14 @@ def main():
     ap.add_argument("paths", nargs="+", help="Zip file(s) and/or extracted folder(s)")
     ap.add_argument("--currency", metavar="CUR", default="EUR", help="Main display currency (default: EUR)")
     ap.add_argument("--color", choices=["auto", "always", "never"], default="auto")
+    ap.add_argument("--locale", metavar="LOCALE", default=None,
+                    help="Locale for number/currency formatting (e.g. fr_FR); defaults to your environment")
     args = ap.parse_args()
     COLOR_MODE = args.color
+    if not setup_locale(args.locale):
+        if args.locale:
+            print(paint(f"warning: unknown locale {args.locale!r}; using environment default", "yellow"), file=sys.stderr)
+            setup_locale()
     currency = args.currency.upper()
     if len(currency) != 3 or not currency.isalpha():
         ap.error(f"invalid --currency {args.currency!r}: expected a 3-letter code like USD, CAD, GBP")

@@ -59,6 +59,7 @@ Options:
 | Flag | Description |
 |------|-------------|
 | `--currency CUR` | Main display currency for converted totals (default: `EUR`, e.g. `--currency USD`) |
+| `--locale LOCALE` | Locale for number/currency formatting (e.g. `fr_FR`); defaults to your environment. Formats amounts per local convention (`20 428,74 €` vs `$20,428.74`); zero-decimal currencies like JPY drop cents |
 | `--color auto\|always\|never` | Colored output (default: `auto`) |
 
 Requires Python 3.9+ (standard library only).

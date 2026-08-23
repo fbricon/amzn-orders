@@ -129,6 +129,28 @@ class RatesTest(unittest.TestCase):
         self.assertEqual(rates.get("EUR", date(2020, 1, 1)), Decimal("1"))
 
 
+class FormatTest(unittest.TestCase):
+    def setUp(self):
+        az.setup_locale("C")
+
+    def test_fmt_c_locale_groups_thousands(self):
+        self.assertEqual(az.fmt(Decimal("1234567.891")), "1,234,567.89")
+        self.assertEqual(az.fmt(Decimal("-5")), "-5.00")
+
+    def test_money_prefix_locale(self):
+        self.assertEqual(az.money(Decimal("12.345"), "EUR"), "€12.35")
+        self.assertEqual(az.money(Decimal("-5"), "USD"), "-$5.00")
+
+    def test_zero_decimal_currencies(self):
+        self.assertEqual(az.money(Decimal("3360317.49"), "JPY"), "¥3,360,317")
+        self.assertEqual(az.money(Decimal("-3360317.49"), "JPY"), "-¥3,360,317")
+
+    def test_setup_locale_rejects_garbage_and_keeps_fallback(self):
+        self.assertTrue(az.setup_locale("C"))
+        self.assertFalse(az.LOCALE_READY)
+        self.assertFalse(az.setup_locale("definitely_not_a_locale_XYZ"))
+
+
 class CacheDirTest(unittest.TestCase):
     def test_linux_uses_xdg(self):
         with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "/xdg"}, clear=True), \
