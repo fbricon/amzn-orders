@@ -9,6 +9,7 @@ import sys
 import urllib.request
 import zipfile
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -57,7 +58,25 @@ def classify(name):
     return None
 
 
+def _file_opener(path):
+    @contextmanager
+    def opener():
+        with path.open(encoding="utf-8-sig", errors="replace", newline="") as fh:
+            yield fh
+    return opener
+
+
+def _zip_opener(zip_path, info):
+    @contextmanager
+    def opener():
+        with zipfile.ZipFile(zip_path) as z:
+            with z.open(info) as raw:
+                yield io.TextIOWrapper(raw, encoding="utf-8-sig", errors="replace", newline="")
+    return opener
+
+
 def iter_files(paths):
+    """Yield (kind, name, opener); opener() is a context manager streaming the CSV text."""
     for raw in paths:
         p = Path(raw).expanduser()
         if p.is_dir():
@@ -65,14 +84,14 @@ def iter_files(paths):
                 if f.is_file() and f.suffix.lower() == ".csv":
                     kind = classify(f.name)
                     if kind:
-                        yield kind, str(f), f.read_text(encoding="utf-8-sig", errors="replace")
+                        yield kind, str(f), _file_opener(f)
         elif p.suffix.lower() == ".zip":
             with zipfile.ZipFile(p) as z:
                 for info in z.infolist():
                     if not info.is_dir():
                         kind = classify(info.filename)
                         if kind:
-                            yield kind, info.filename, z.read(info).decode("utf-8-sig", errors="replace")
+                            yield kind, info.filename, _zip_opener(p, info)
         else:
             print(paint(f"warning: skipping {p} (not a folder or zip)", "yellow"), file=sys.stderr)
 
@@ -122,77 +141,78 @@ class Data:
 def scan(paths):
     data = Data()
     deferred = []
-    for kind, name, text in iter_files(paths):
+    for kind, name, opener in iter_files(paths):
         data.files += 1
         if kind == "digital_money":
-            deferred.append(text)
+            deferred.append(opener)
             continue
-        _scan_csv(data, kind, text)
+        _scan_csv(data, kind, opener)
 
-    for text in deferred:
-        _scan_csv(data, "digital_money", text)
+    for opener in deferred:
+        _scan_csv(data, "digital_money", opener)
     return data
 
 
-def _scan_csv(data, kind, text):
-    reader = csv.DictReader(io.StringIO(text))
-    fields = {}
-    for fn in reader.fieldnames or []:
-        fields.setdefault(_hdr(fn), fn)
+def _scan_csv(data, kind, opener):
+    with opener() as fh:
+        reader = csv.DictReader(fh)
+        fields = {}
+        for fn in reader.fieldnames or []:
+            fields.setdefault(_hdr(fn), fn)
 
-    def col(row, key):
-        return (row.get(fields.get(_hdr(key))) or "").strip()
+        def col(row, key):
+            return (row.get(fields.get(_hdr(key))) or "").strip()
 
-    def num(row, *keys):
-        for k in keys:
-            v = to_decimal(col(row, k))
-            if v is not None:
-                return v
-        return None
+        def num(row, *keys):
+            for k in keys:
+                v = to_decimal(col(row, k))
+                if v is not None:
+                    return v
+            return None
 
-    local = Counter()
-    if kind == "retail":
-        for r in reader:
-            cur = col(r, "Currency").upper()
-            amt = num(r, "Total Owed", "Total Amount")
-            if not cur or amt is None:
-                continue
-            local[(col(r, "Order ID"), to_date(col(r, "Order Date")), cur, amt, col(r, "Product Name"))] += 1
-    elif kind == "digital_dates":
-        for r in reader:
-            pid = col(r, "DeliveryPacketId")
-            d = to_date(col(r, "OrderDate")) or to_date(col(r, "Order Date"))
-            oid = col(r, "OrderId") or col(r, "Order ID")
-            prev = data.packet_info.get(pid)
-            if prev is None or (d and not prev[0]):
-                data.packet_info[pid] = (d, oid)
-        return
-    elif kind == "digital_money":
-        for r in reader:
-            cur = (col(r, "BaseCurrencyCode") or col(r, "Base Currency Code")).upper()
-            amt = num(r, "TransactionAmount", "Transaction Amount")
-            if not cur or amt is None:
-                continue
-            pid = col(r, "DeliveryPacketId") or col(r, "Delivery Packet ID")
-            pdate, poid = data.packet_info.get(pid, (None, ""))
-            oid = col(r, "Order ID") or poid or pid
-            d = to_date(col(r, "Fulfilled Date")) or to_date(col(r, "Order Date")) or pdate
-            local[(oid, d, cur, amt)] += 1
-    elif kind == "refunds":
-        for r in reader:
-            if col(r, "Status") != "Completed" and col(r, "Payment Status") != "Completed":
-                continue
-            cur = col(r, "Currency").upper()
-            amt = num(r, "AmountRefunded", "Refund Amount")
-            if not cur or amt is None:
-                continue
-            d = to_date(col(r, "RefundCompletionDate")) or to_date(col(r, "Refund Date"))
-            local[(col(r, "OrderID") or col(r, "Order ID"), d, cur, amt)] += 1
-    else:
-        return
-    target = {"retail": data.retail, "digital_money": data.digital, "refunds": data.refunds}[kind]
-    for key, n in local.items():
-        target[key] = max(target[key], n)
+        local = Counter()
+        if kind == "retail":
+            for r in reader:
+                cur = col(r, "Currency").upper()
+                amt = num(r, "Total Owed", "Total Amount")
+                if not cur or amt is None:
+                    continue
+                local[(col(r, "Order ID"), to_date(col(r, "Order Date")), cur, amt, col(r, "Product Name"))] += 1
+        elif kind == "digital_dates":
+            for r in reader:
+                pid = col(r, "DeliveryPacketId")
+                d = to_date(col(r, "OrderDate")) or to_date(col(r, "Order Date"))
+                oid = col(r, "OrderId") or col(r, "Order ID")
+                prev = data.packet_info.get(pid)
+                if prev is None or (d and not prev[0]):
+                    data.packet_info[pid] = (d, oid)
+            return
+        elif kind == "digital_money":
+            for r in reader:
+                cur = (col(r, "BaseCurrencyCode") or col(r, "Base Currency Code")).upper()
+                amt = num(r, "TransactionAmount", "Transaction Amount")
+                if not cur or amt is None:
+                    continue
+                pid = col(r, "DeliveryPacketId") or col(r, "Delivery Packet ID")
+                pdate, poid = data.packet_info.get(pid, (None, ""))
+                oid = col(r, "Order ID") or poid or pid
+                d = to_date(col(r, "Fulfilled Date")) or to_date(col(r, "Order Date")) or pdate
+                local[(oid, d, cur, amt)] += 1
+        elif kind == "refunds":
+            for r in reader:
+                if col(r, "Status") != "Completed" and col(r, "Payment Status") != "Completed":
+                    continue
+                cur = col(r, "Currency").upper()
+                amt = num(r, "AmountRefunded", "Refund Amount")
+                if not cur or amt is None:
+                    continue
+                d = to_date(col(r, "RefundCompletionDate")) or to_date(col(r, "Refund Date"))
+                local[(col(r, "OrderID") or col(r, "Order ID"), d, cur, amt)] += 1
+        else:
+            return
+        target = {"retail": data.retail, "digital_money": data.digital, "refunds": data.refunds}[kind]
+        for key, n in local.items():
+            target[key] = max(target[key], n)
 
 
 class Rates:
