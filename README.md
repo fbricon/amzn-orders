@@ -63,6 +63,14 @@ Options:
 
 Requires Python 3.9+ (standard library only).
 
+## Development
+
+Run the tests with:
+
+```bash
+python3 -m unittest test_amazon_spend
+```
+
 ## What it reports
 
 1. **Per currency (original amounts)** — orders, total spent, refunds, net
@@ -106,9 +114,14 @@ The tool scans each source for these CSVs and ignores everything else
 Identical rows found in multiple sources are counted once — even across the
 two export layouts — so you can safely combine overlapping exports.
 
-Exchange rates are cached per currency/year in `~/.cache/amzn-orders`. If the
-API is unreachable, approximate flat rates are used instead and flagged with
-`(approx rate)` in the output.
+Exchange rates are cached per currency/year in `~/.cache/amzn-orders`.
+
+- If the API is unreachable for a currency that has a built-in approximation,
+  that flat rate is used and every affected line is flagged `(approx rate)`,
+  with a note under the grand total.
+- If no rate data exists at all for a currency (offline and no approximation),
+  its transactions are excluded from converted totals with a loud warning
+  rather than silently counted as zero.
 
 ## Limitations
 
