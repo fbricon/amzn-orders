@@ -183,6 +183,7 @@ class Rates:
     def load(self, currencies, years):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         wanted = set(currencies) | {self.target}
+        years = set(years) or {date.today().year}
         offline = []
         for cur in wanted:
             if cur == "EUR":
