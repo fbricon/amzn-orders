@@ -1,8 +1,11 @@
 import io
+import os
 import unittest
 from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
+from unittest import mock
 
 import amazon_spend as az
 
@@ -124,6 +127,27 @@ class RatesTest(unittest.TestCase):
     def test_target_is_one(self):
         rates = self.make_rates()
         self.assertEqual(rates.get("EUR", date(2020, 1, 1)), Decimal("1"))
+
+
+class CacheDirTest(unittest.TestCase):
+    def test_linux_uses_xdg(self):
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "/xdg"}, clear=True), \
+                mock.patch("sys.platform", "linux"):
+            self.assertEqual(az._cache_dir(), Path("/xdg/amzn-orders"))
+
+    def test_windows_uses_localappdata(self):
+        env = {"LOCALAPPDATA": r"C:\Users\u\AppData\Local"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.platform", "win32"):
+            self.assertEqual(az._cache_dir(), Path(env["LOCALAPPDATA"]) / "amzn-orders")
+
+    def test_macos_uses_library_caches(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch("sys.platform", "darwin"):
+            self.assertEqual(az._cache_dir(), Path.home() / "Library" / "Caches" / "amzn-orders")
+
+    def test_env_override_wins(self):
+        with mock.patch.dict(os.environ, {"AMZN_ORDERS_CACHE": "/custom"}, clear=True), \
+                mock.patch("sys.platform", "win32"):
+            self.assertEqual(az._cache_dir(), Path("/custom"))
 
 
 if __name__ == "__main__":

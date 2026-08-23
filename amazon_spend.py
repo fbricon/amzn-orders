@@ -4,6 +4,7 @@ import bisect
 import csv
 import io
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -23,7 +24,21 @@ NEW_RETAIL = "order history.csv"
 NEW_DIGITAL = "digital content orders.csv"
 NEW_REFUNDS = "refund details.csv"
 
-CACHE_DIR = Path.home() / ".cache" / "amzn-orders"
+def _cache_dir():
+    """Per-platform cache location: %LOCALAPPDATA% on Windows, ~/Library/Caches on macOS, XDG on Linux."""
+    override = os.environ.get("AMZN_ORDERS_CACHE")
+    if override:
+        return Path(override)
+    if sys.platform == "win32":
+        root = os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local"
+        return Path(root) / "amzn-orders"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "amzn-orders"
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    return Path(xdg) / "amzn-orders" if xdg else Path.home() / ".cache" / "amzn-orders"
+
+
+CACHE_DIR = _cache_dir()
 FALLBACK_RATE = {"USD": Decimal("0.92"), "GBP": Decimal("1.16"), "CAD": Decimal("0.68")}
 SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "JPY": "¥", "CAD": "CA$", "AUD": "A$", "CHF": "CHF "}
 
@@ -241,7 +256,7 @@ class Rates:
         merged, missing = {}, []
         for y in sorted(years):
             try:
-                cached = json.loads((CACHE_DIR / f"{cur}-{y}.json").read_text())
+                cached = json.loads((CACHE_DIR / f"{cur}-{y}.json").read_text(encoding="utf-8"))
                 merged.update({date.fromisoformat(k): Decimal(str(v)) for k, v in cached.items()})
             except Exception:
                 missing.append(y)
@@ -254,7 +269,7 @@ class Rates:
                     chunk = {d: v for d, v in daily.items() if d.year == y}
                     if chunk:
                         (CACHE_DIR / f"{cur}-{y}.json").write_text(
-                            json.dumps({d.isoformat(): str(v) for d, v in sorted(chunk.items())}))
+                            json.dumps({d.isoformat(): str(v) for d, v in sorted(chunk.items())}), encoding="utf-8")
                 fetched = True
             except Exception as e:
                 print(paint(f"warning: FX fetch failed for {cur}: {e}", "yellow"), file=sys.stderr)
@@ -479,6 +494,11 @@ def report(data, target="EUR", rates=None):
 
 def main():
     global COLOR_MODE
+    if sys.platform == "win32":
+        os.system("")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="Overview of Amazon spending from GDPR export folders/zips")
     ap.add_argument("paths", nargs="+", help="Zip file(s) and/or extracted folder(s)")
     ap.add_argument("--currency", metavar="CUR", default="EUR", help="Main display currency (default: EUR)")
