@@ -8,6 +8,7 @@ import re
 import sys
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -228,44 +229,52 @@ class Rates:
         self.approx_used = set()
         self.offline = set()
 
+    def _fetch(self, cur, first, last):
+        url = f"https://api.frankfurter.app/{first}-01-01..{last}-12-31?from={cur}&to=EUR"
+        req = urllib.request.Request(url, headers={"User-Agent": "amzn-orders/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.load(resp, parse_float=Decimal)["rates"]
+        return {date.fromisoformat(k): v["EUR"] for k, v in payload.items() if v.get("EUR")}
+
+    def _load_one(self, cur, years):
+        """Load one currency's rates from cache, backfilling all missing years in a single ranged fetch."""
+        merged, missing = {}, []
+        for y in sorted(years):
+            try:
+                cached = json.loads((CACHE_DIR / f"{cur}-{y}.json").read_text())
+                merged.update({date.fromisoformat(k): Decimal(str(v)) for k, v in cached.items()})
+            except Exception:
+                missing.append(y)
+        fetched = False
+        if missing:
+            try:
+                daily = self._fetch(cur, min(missing), max(missing))
+                merged.update(daily)
+                for y in missing:
+                    chunk = {d: v for d, v in daily.items() if d.year == y}
+                    if chunk:
+                        (CACHE_DIR / f"{cur}-{y}.json").write_text(
+                            json.dumps({d.isoformat(): str(v) for d, v in sorted(chunk.items())}))
+                fetched = True
+            except Exception as e:
+                print(paint(f"warning: FX fetch failed for {cur}: {e}", "yellow"), file=sys.stderr)
+        if merged:
+            days = sorted(merged)
+            return cur, (days, [merged[d] for d in days]), False
+        return cur, None, not fetched
+
     def load(self, currencies, years):
         """Load daily rates for currencies+target; sets .offline to currencies with NO rate data."""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        wanted = set(currencies) | {self.target}
+        wanted = [c for c in (set(currencies) | {self.target}) if c != "EUR"]
         years = set(years) or {date.today().year}
-        offline = []
-        for cur in wanted:
-            if cur == "EUR":
-                continue
-            merged = {}
-            missing = []
-            caches = {}
-            for y in sorted(years):
-                cf = CACHE_DIR / f"{cur}-{y}.json"
-                caches[y] = cf
-                try:
-                    merged.update({date.fromisoformat(k): v for k, v in json.loads(cf.read_text(), parse_float=Decimal).items()})
-                except Exception:
-                    missing.append(y)
-            fetched = False
-            for y in missing:
-                try:
-                    url = f"https://api.frankfurter.app/{y}-01-01..{y}-12-31?from={cur}&to=EUR"
-                    req = urllib.request.Request(url, headers={"User-Agent": "amzn-orders/1.0"})
-                    with urllib.request.urlopen(req, timeout=15) as resp:
-                        payload = json.load(resp, parse_float=Decimal)["rates"]
-                    daily = {date.fromisoformat(k): v["EUR"] for k, v in payload.items() if v.get("EUR")}
-                    merged.update(daily)
-                    cf.write_text(json.dumps({k.isoformat(): str(v) for k, v in sorted(daily.items())}))
-                    fetched = True
-                except Exception:
-                    pass
-            if merged:
-                days = sorted(merged)
-                self.series[cur] = (days, [merged[d] for d in days])
-            elif not fetched:
-                offline.append(cur)
-        self.offline = set(offline)
+        self.offline = set()
+        with ThreadPoolExecutor(max_workers=min(len(wanted) or 1, 8)) as pool:
+            for cur, series, is_offline in pool.map(lambda c: self._load_one(c, years), wanted):
+                if series:
+                    self.series[cur] = series
+                if is_offline:
+                    self.offline.add(cur)
         return self.offline
 
     def _eur_per_unit(self, cur, day):
