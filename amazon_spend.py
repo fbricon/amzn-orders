@@ -252,7 +252,7 @@ def report(data, target="EUR"):
         for (oid, d, cur, amt), n in data.digital.items()
         for _ in range(n)
     ]
-    refunds = [row for row, n in data.refunds.items() for _ in range(n)]
+    refund_rows = [row for row, n in data.refunds.items() for _ in range(n)]
 
     spent_cur = defaultdict(Decimal)
     refund_cur = defaultdict(Decimal)
@@ -265,7 +265,6 @@ def report(data, target="EUR"):
         if d:
             spent_year_cur[d.year][cur] += amt
             days.add(d)
-    refund_rows = [(oid, d, cur, amt) for oid, d, cur, amt in refunds]
     for oid, d, cur, amt in refund_rows:
         refund_cur[cur] += amt
         if d:
