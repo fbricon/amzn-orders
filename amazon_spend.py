@@ -40,7 +40,7 @@ def _cache_dir():
 
 CACHE_DIR = _cache_dir()
 FALLBACK_RATE = {"USD": Decimal("0.92"), "GBP": Decimal("1.16"), "CAD": Decimal("0.68")}
-SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "JPY": "¥", "CAD": "CA$", "AUD": "A$", "CHF": "CHF "}
+SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "JPY": "¥", "INR": "₹", "CAD": "CA$", "AUD": "A$", "CHF": "CHF "}
 
 STYLES = {
     "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
@@ -438,7 +438,7 @@ def report(data, target="EUR", rates=None):
         lines.append(paint(f"  ! {n} transaction(s) missing from totals — no FX data for: {', '.join(sorted(excluded_n))}", "red"))
         print(paint(f"warning: no exchange rates for {', '.join(sorted(excluded_n))}; {n} transaction(s) excluded from {target} totals", "yellow"), file=sys.stderr)
     if total_refund:
-        lines.append(paint(f"  ({fmt(total_spent)} spent − {fmt(total_refund)} refunded)", "dim"))
+        lines.append(paint(f"  ({sym}{fmt(total_spent)} spent − {sym}{fmt(total_refund)} refunded)", "dim"))
     lines.append("")
 
     yearly = defaultdict(Decimal)
