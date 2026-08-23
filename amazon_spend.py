@@ -483,9 +483,10 @@ def report(data, target="EUR", rates=None):
         lines.append(f"  {d or '?'}  {paint(f'{sym}{fmt(e):>9}', 'cyan')}{extra}  {name}")
 
     lines.append("")
+    cache_disp = str(CACHE_DIR).replace(str(Path.home()), "~", 1)
     lines.append(paint(
         f"FX: ECB daily reference rates via frankfurter.app — purchases at purchase-date rate,"
-        f" refunds at refund-date rate · cached in ~/.cache/amzn-orders",
+        f" refunds at refund-date rate · cached in {cache_disp}",
         "dim",
     ))
 
