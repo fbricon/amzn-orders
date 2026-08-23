@@ -33,6 +33,8 @@ COLOR_MODE = "auto"
 
 
 def paint(text, *styles):
+    if not styles:
+        return text
     enabled = COLOR_MODE == "always" or (COLOR_MODE == "auto" and sys.stdout.isatty())
     if not enabled:
         return text
@@ -329,18 +331,20 @@ def report(data, target="EUR"):
     for _, d, c, a in refund_rows:
         if d:
             refund_year_cur[d.year][c] += a
+    ref_by_year = {y: ", ".join(f"-{c} {fmt(v)}" for c, v in sorted(refund_year_cur[y].items()) if v) for y in yearly}
+    refw = max(8, max((len(s) for s in ref_by_year.values()), default=0))
     lines.append(paint(f"By year (net {target})", "bold"))
-    lines.append(paint(f"  {'YEAR':<6}{'NET':>14}{'REFUNDED':>15}  SPENT (original)", "dim"))
+    lines.append(paint(f"  {'YEAR':<6}{'NET':>14}  {'REFUNDED':>{refw}}  SPENT (original)", "dim"))
     for y in sorted(yearly):
         spent = ", ".join(f"{c} {fmt(v)}" for c, v in sorted(spent_year_cur[y].items()) if v)
-        refs = ", ".join(f"-{c} {fmt(v)}" for c, v in sorted(refund_year_cur[y].items()) if v)
         val = paint(f"{sym + fmt(yearly[y]):>14}", "bold", "green" if yearly[y] >= 0 else "red")
-        ref_cell = paint(f"{refs:>15}", "red") if refs else f"{'':>15}"
-        lines.append(f"  {y:<6}{val}{ref_cell}  {paint(spent, 'dim')}")
+        refs = ref_by_year[y]
+        ref_cell = paint(f"{refs:>{refw}}", "red") if refs else f"{'':>{refw}}"
+        lines.append(f"  {y:<6}{val}  {ref_cell}  {paint(spent, 'dim')}")
     year_total = sum(yearly.values(), Decimal("0"))
     total_label = paint(f"{'TOTAL':<6}", "bold")
-    tr_cell = paint(f"{'-' + sym + fmt(total_refund):>15}", "red") if total_refund else f"{'':>15}"
-    lines.append(f"  {total_label}{paint(f'{sym + fmt(year_total):>14}', 'bold', 'green')}{tr_cell}")
+    tr_cell = paint(f"{'-' + sym + fmt(total_refund):>{refw}}", "red") if total_refund else f"{'':>{refw}}"
+    lines.append(f"  {total_label}{paint(f'{sym + fmt(year_total):>14}', 'bold', 'green')}  {tr_cell}")
 
     top = sorted(((to_target(a, c, d), d, c, a, nm) for _, d, c, a, nm in purchases), key=lambda t: t[0], reverse=True)[:10]
     lines.append("")
