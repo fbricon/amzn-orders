@@ -222,9 +222,10 @@ class Rates:
         self.target = target.upper()
         self.series = {}
         self.approx_used = set()
+        self.offline = set()
 
     def load(self, currencies, years):
-        """Load daily rates for currencies+target; returns currencies with NO rate data at all."""
+        """Load daily rates for currencies+target; sets .offline to currencies with NO rate data."""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         wanted = set(currencies) | {self.target}
         years = set(years) or {date.today().year}
@@ -260,7 +261,8 @@ class Rates:
                 self.series[cur] = (days, [merged[d] for d in days])
             elif not fetched:
                 offline.append(cur)
-        return set(offline)
+        self.offline = set(offline)
+        return self.offline
 
     def _eur_per_unit(self, cur, day):
         if cur == "EUR":
@@ -293,7 +295,29 @@ def fmt(x):
     return f"{x.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
 
 
-def report(data, target="EUR"):
+def fx_universe(data):
+    """Currencies and activity days across all scanned rows."""
+    curs, days = set(), set()
+    for ctr in (data.retail, data.digital, data.refunds):
+        for row in ctr:
+            if row[1]:
+                days.add(row[1])
+            if row[2]:
+                curs.add(row[2])
+    return curs, days
+
+
+def load_rates_or_exit(data, target):
+    rates = Rates(target)
+    curs, days = fx_universe(data)
+    no_data = rates.load(curs, {d.year for d in days})
+    if target != "EUR" and target in no_data and target not in FALLBACK_RATE:
+        print(paint(f"error: no exchange rates available for {target} (offline?)", "red"), file=sys.stderr)
+        sys.exit(1)
+    return rates
+
+
+def report(data, target="EUR", rates=None):
     sym = csym(target)
     purchases = [
         row
@@ -310,24 +334,17 @@ def report(data, target="EUR"):
     refund_cur = defaultdict(Decimal)
     orders = defaultdict(set)
     spent_year_cur = defaultdict(lambda: defaultdict(Decimal))
-    days = set()
     for oid, d, cur, amt, name in purchases:
         spent_cur[cur] += amt
         orders[cur].add(oid)
         if d:
             spent_year_cur[d.year][cur] += amt
-            days.add(d)
     for oid, d, cur, amt in refund_rows:
         refund_cur[cur] += amt
-        if d:
-            days.add(d)
 
     currencies = sorted(set(spent_cur) | set(refund_cur), key=lambda c: -spent_cur[c])
-    rates = Rates(target)
-    no_data = rates.load(currencies, {d.year for d in days})
-    if target != "EUR" and target in no_data and target not in FALLBACK_RATE:
-        print(paint(f"error: no exchange rates available for {target} (offline?)", "red"), file=sys.stderr)
-        sys.exit(1)
+    if rates is None:
+        rates = load_rates_or_exit(data, target)
 
     def to_target(amount, cur, d):
         rate = rates.get(cur, d)
@@ -379,7 +396,7 @@ def report(data, target="EUR"):
             continue
         s = sum((v for _, d, c, a, _ in purchases if c == cur for v in [to_target(a, c, d)] if v is not None), Decimal("0"))
         r = sum((v for _, d, c, a in refund_rows if c == cur for v in [to_target(a, c, d)] if v is not None), Decimal("0"))
-        note = paint(" (approx rate)", "yellow") if cur in no_data or cur in rates.approx_used else ""
+        note = paint(" (approx rate)", "yellow") if cur in rates.offline or cur in rates.approx_used else ""
         seg = f"{f'{sym}{fmt(s)}':>14}"
         if r:
             seg += f"  {paint('-' + sym + fmt(r), 'red')}"
@@ -463,7 +480,8 @@ def main():
     if not data.files:
         print("No Amazon order CSVs found.", file=sys.stderr)
         sys.exit(1)
-    report(data, currency)
+    rates = load_rates_or_exit(data, currency)
+    report(data, currency, rates)
 
 
 if __name__ == "__main__":
