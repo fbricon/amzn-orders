@@ -1,7 +1,7 @@
 # amzn-orders
 
 Summarize how much money you've spent on Amazon, from the order history in your
-[Amazon data export](https://www.amazon.com/gp/help/customer/display.html?nodeId=GYQTSSRHKUEM2QAF)
+[Amazon data export](https://www.amazon.com/gp/help/customer/display.html?nodeId=TP1zlemejtTn6pwYKS)
 (GDPR "Request my data" download).
 
 Works with extracted folders and/or `.zip` archives — pass as many as you want.
@@ -14,7 +14,7 @@ your personal data (GDPR-style export), which includes your full order history:
 
 1. Sign in to your Amazon account.
 2. Go to **Account & Lists → Account → Privacy → Request your data**
-   (direct link: [amazon.com/hz/privacy-central/data-requests](https://www.amazon.com/hz/privacy-central/data-requests/preview)).
+   (direct link: https://www.amazon.com/hz/privacy-central/data-requests/preview.html).
    On other marketplaces use the same path, e.g. `amazon.de`, `amazon.ca`, `amazon.fr`.
 3. Click **Request all your data** (or select at least the *Orders*, *Digital
    Orders* and *Returns & Refunds* categories).
